@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+if(NOT CER4ALL_BOARD)
+    message(FATAL_ERROR "Select a cer4all PlatformIO environment")
+endif()
+set(SDKCONFIG_DEFAULTS "${CMAKE_SOURCE_DIR}/sdkconfig.defaults;${CMAKE_SOURCE_DIR}/sdkconfig.${CER4ALL_BOARD}.defaults")
+file(STRINGS "${CMAKE_SOURCE_DIR}/version.txt" PROJECT_VER LIMIT_COUNT 1)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(cer4all)

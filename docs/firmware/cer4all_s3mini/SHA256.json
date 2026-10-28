@@ -1,0 +1,6 @@
+{
+  "bootloader.bin": "4abeb3eb3c113684ac94a36dd18d84a6bf85ca655d025962f06b7af3cf945044",
+  "firmware.bin": "a3385084a7a2830aa77f88437baf1c54516244f229df1548115be68989a676e5",
+  "manifest.json": "72fe9f278adaf0a5fe6cb6af0e7a4db1c94e39f58d3f784e781a5ea29c46bdc9",
+  "partitions.bin": "520c18ca0bda73aed288d427d260ab051d71219f605707350e6c42401f4836fc"
+}

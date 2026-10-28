@@ -1,0 +1,7 @@
+.pio/
+sdkconfig.cer4all_*
+managed_components/
+references/
+__pycache__/
+build-tests/
+CER4ALL_Grundlagen.md

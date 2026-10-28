@@ -1,0 +1,56 @@
+{
+  "version": "0.1.0-dev",
+  "hardware_tested": false,
+  "host_tests": {
+    "date": "2026-10-28",
+    "passed": true,
+    "toolchain": "C++17 core tests",
+    "tests": [
+      "USB chip identity without fixed figure IDs",
+      "20000 FIFO operations and overflow rejection",
+      "8/320 framing, splits1..256",
+      "81-corner RGB mapping",
+      "RGB fragments1..253 and native passthrough",
+      "LED deduplication and invalid frames",
+      "arbitrary runtime ID learning and immediate known moves",
+      "bounded hold and duplicate phantom rejection",
+      "first Sentio line unchanged for all chip hints",
+      "upstream native/off-filter byte identity"
+    ],
+    "source_sha256": {
+      "include/core.hpp": "008e268911a94ad7487701d84a26609d0430a7b9c895d3a22762633e459388ee",
+      "test/core_test.cpp": "70670f498985513a95f8fc429e05f78c204ab46c5e0eb963bd142977ef0f7840"
+    }
+  },
+  "builds": {
+    "cer4all_s3mini": {
+      "flash_mb": 4,
+      "files": {
+        "bootloader.bin": "4abeb3eb3c113684ac94a36dd18d84a6bf85ca655d025962f06b7af3cf945044",
+        "firmware.bin": "a3385084a7a2830aa77f88437baf1c54516244f229df1548115be68989a676e5",
+        "manifest.json": "72fe9f278adaf0a5fe6cb6af0e7a4db1c94e39f58d3f784e781a5ea29c46bdc9",
+        "partitions.bin": "520c18ca0bda73aed288d427d260ab051d71219f605707350e6c42401f4836fc"
+      }
+    },
+    "cer4all_s3wroom": {
+      "flash_mb": 16,
+      "files": {
+        "bootloader.bin": "fb103776331761fbdf1da3701ff495d80826fdebb9683ecd1b912e511ed32235",
+        "firmware.bin": "2d83d545782c9fbc76e5e757e1ae6d8f34233e6a3078cf3305e34d47a0b7a5de",
+        "manifest.json": "23dc13a12dc9d7e7f7b886cfb0678222d1f2e5892f0b706d49a3be2ea6a6850f",
+        "partitions.bin": "520c18ca0bda73aed288d427d260ab051d71219f605707350e6c42401f4836fc"
+      }
+    }
+  },
+  "source_sha256": {
+    "src/ble_bridge.cpp": "962f7d28eece09aed97d95d6c0db419e769799204a3bc3c228c284273473704e",
+    "src/bridge.cpp": "20db96519841da30cb5677cddc03575e282c2d0ab4f01a715352b2b45b87da6f",
+    "src/CMakeLists.txt": "66d55561254b405aac4b4909226b196a4a0b23051ca403456816cc38d648e447",
+    "src/idf_component.yml": "8e048c25690a304f3defe3aac7377dc337b5967f24f1beffe251ba02e4c47194",
+    "src/main.cpp": "7ad3322dbf6befe15a402ea51185a415df1204521cddf368cef44dc92127a9cd",
+    "src/usb_bridge.cpp": "d6acb2ef47b05e6f1453240a64929deb47c4eb798994e3f05c0e1ecf1aacec80",
+    "include/bridge.hpp": "fbaf7957ee141a31adda190360a465182bfd3c7fd95926f24bfe5789cc192af9",
+    "include/core.hpp": "008e268911a94ad7487701d84a26609d0430a7b9c895d3a22762633e459388ee"
+  },
+  "source_archive_sha256": "023c7ecd81cebdedb137f14214e07328c990eb96b04c3a5727a66eafbda9c19b"
+}
