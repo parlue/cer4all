@@ -91,11 +91,18 @@ int access(uint16_t connection, uint16_t, ble_gatt_access_ctxt *ctx, void *) {
 ble_gatt_chr_def nusCharacteristics[3]{};
 
 ble_gatt_svc_def services[2]{};
+int notifyAccess(uint16_t, uint16_t, ble_gatt_access_ctxt *ctx, void *) {
+    // NimBLE requires a callback even for notify-only characteristics.
+    return ctx->op == BLE_GATT_ACCESS_OP_WRITE_CHR
+               ? BLE_ATT_ERR_WRITE_NOT_PERMITTED
+               : BLE_ATT_ERR_READ_NOT_PERMITTED;
+}
 void configureServices() {
     nusCharacteristics[0].uuid = &rxUuid.u;
     nusCharacteristics[0].access_cb = access;
     nusCharacteristics[0].flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP;
     nusCharacteristics[1].uuid = &txUuid.u;
+    nusCharacteristics[1].access_cb = notifyAccess;
     nusCharacteristics[1].flags = BLE_GATT_CHR_F_NOTIFY;
     nusCharacteristics[1].val_handle = &txHandle;
     services[0].type = BLE_GATT_SVC_TYPE_PRIMARY;

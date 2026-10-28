@@ -2,7 +2,7 @@
 
 USB-to-Bluetooth Low Energy bridge for Certabo, Tabutronic Spectrum and Sentio chessboards, running on ESP32-S3.
 
-**Development firmware: 0.1.1-dev.** Both hardware targets build successfully and portable software tests pass. Testing with physical chessboards is still pending.
+**Development firmware: 0.1.2-dev.** Fixes a BLE startup failure affecting both board types: NimBLE requires an access callback on notify-only characteristics. Hardware retesting is still pending.
 
 ## Web flasher
 
