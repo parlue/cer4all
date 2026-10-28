@@ -5,3 +5,8 @@ references/
 __pycache__/
 build-tests/
 CER4ALL_Grundlagen.md
+
+# Local documentation and generated development reports
+*.md
+/BUILD_RESULT.json
+/TEST_RESULT.json

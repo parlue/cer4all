@@ -38,7 +38,7 @@ with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
     for folder in ('src','include','test','tools','third_party'):
         for p in (root/folder).rglob('*'):
             if p.is_file() and '__pycache__' not in p.parts:z.write(p,p.relative_to(root))
-    for name in ('docs/index.html','docs/debug.html','docs/DIAGNOSE.md','.gitignore','.clang-format','platformio.ini','version.txt','CMakeLists.txt','partitions.csv','sdkconfig.defaults','sdkconfig.mini.defaults','sdkconfig.wroom.defaults','dependencies.lock','TEST_RESULT.json','README.md','QUELLEN.md','VALIDIERUNG.md'):
+    for name in ('.gitattributes','.gitignore','.clang-format','platformio.ini','version.txt','CMakeLists.txt','partitions.csv','sdkconfig.defaults','sdkconfig.mini.defaults','sdkconfig.wroom.defaults','dependencies.lock'):
         p=root/name
         if p.exists():z.write(p,name)
 report['source_archive_sha256']=sha(archive)
