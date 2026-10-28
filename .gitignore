@@ -8,5 +8,6 @@ CER4ALL_Grundlagen.md
 
 # Local documentation and generated development reports
 *.md
+!README.md
 /BUILD_RESULT.json
 /TEST_RESULT.json
