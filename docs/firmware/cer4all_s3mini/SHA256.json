@@ -1,6 +1,6 @@
 {
-  "bootloader.bin": "4abeb3eb3c113684ac94a36dd18d84a6bf85ca655d025962f06b7af3cf945044",
-  "firmware.bin": "a3385084a7a2830aa77f88437baf1c54516244f229df1548115be68989a676e5",
-  "manifest.json": "72fe9f278adaf0a5fe6cb6af0e7a4db1c94e39f58d3f784e781a5ea29c46bdc9",
-  "partitions.bin": "520c18ca0bda73aed288d427d260ab051d71219f605707350e6c42401f4836fc"
+  "bootloader.bin": "d26aa5ebff4a5e25fcb56cbf5d6e6ed159211f49845f97072552b8af00c5dafd",
+  "firmware.bin": "5fe63d94f363060767fe54a60a9501f3d7b044cca6c6211e677f1b52df9a7d74",
+  "manifest.json": "dc8be6df3b8fec68b7600d12fd3237d6033850caaeeda2a8bc3d658265472a72",
+  "partitions.bin": "c580f1de6fef2fc704b85eb5a1165979e63dd3ee101cd0a6919f773881c237f9"
 }

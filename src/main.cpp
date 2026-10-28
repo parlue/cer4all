@@ -11,5 +11,5 @@ extern "C" void app_main() {
     cer4all::startBridge();
     cer4all::startBle();
     cer4all::startUsb();
-    cer4all::debug("cer4all 0.1.0-dev ready; USB host GPIO19/20; no LED probes");
+    cer4all::debug("cer4all 0.1.1-dev ready; USB host GPIO19/20; no LED probes");
 }

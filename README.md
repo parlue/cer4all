@@ -2,7 +2,7 @@
 
 USB-to-Bluetooth Low Energy bridge for Certabo, Tabutronic Spectrum and Sentio chessboards, running on ESP32-S3.
 
-**Development firmware: 0.1.0-dev.** Both hardware targets build successfully and portable software tests pass. Testing with physical chessboards is still pending.
+**Development firmware: 0.1.1-dev.** Both hardware targets build successfully and portable software tests pass. Testing with physical chessboards is still pending.
 
 ## Web flasher
 
@@ -42,22 +42,22 @@ The chip mapping targets the boards used for this project. It is not a guarantee
 - Notify characteristic: `6e400003-b5a3-f393-e0a9-e50e24dcca9e`.
 - Preferred BLE MTU: 256; smaller negotiated MTUs are supported through fragmentation.
 - No pairing or bonding is required.
-- One chess application connection plus an optional diagnostic connection.
+- One chess application connection; the existing eChessGateway app is used separately for log download.
 - Ordered, bounded queues: 32 KiB USB-to-BLE and 16 KiB application-to-USB. Queue exhaustion causes an explicit error and disconnect rather than silent truncation.
 
 Certabo, Sentio and unknown boards receive native LED bytes unchanged. Spectrum accepts native 247-byte RGB frames and converts standard 8-byte masks to the four corner LEDs of each square. Converted masks use blue at 80% brightness. Identical completed Spectrum LED outputs are suppressed without a timed delay. There is no move interpretation, blink scheduling or field accumulation in the bridge.
 
 A 247-byte RGB frame takes approximately 64 ms over the 38400-baud serial link. Sustained rates above roughly 15 frames per second can therefore create a backlog.
 
-### Spectrum LED input modes
+### Spectrum LED input
 
-In `AUTO`, a single 8-byte BLE write is treated as a monochrome mask; otherwise `FF55` starts an RGB frame. Arbitrary fragmentation can be ambiguous because monochrome masks have no frame signature. For such clients, select `LEDS MONO` or `LEDS RGB` in diagnostics before starting the application session. RGB-to-monochrome conversion is not implemented.
+A single 8-byte BLE write is treated as a monochrome mask; otherwise `FF55` starts an RGB frame. Arbitrary fragmentation can be ambiguous because monochrome masks have no frame signature. Standard complete RGB frames and 20-byte RGB fragments are supported. No runtime configuration interface is provided. RGB-to-monochrome conversion is not implemented.
 
 ### Runtime noise filtering
 
 No piece IDs or prefix lists are built in. The Spectrum filter learns stable IDs in RAM after three consistent observations without duplicate candidates on another square. Known IDs and empty readings then pass immediately. Unstable unknown values can hold the previous square contents for at most three observations. Learned IDs are cleared when USB reconnects.
 
-Stable sensor noise can resemble a real new piece; filtering cannot reliably distinguish every such case. The filter can be disabled for comparison tests.
+Stable sensor noise can resemble a real new piece; filtering cannot reliably distinguish every such case. There is no user-facing filter setting.
 
 ## Building
 
@@ -79,26 +79,29 @@ python tools\package.py
 
 The test runner generates a local `TEST_RESULT.json`. Packaging checks its source hashes and uses the actual IDF flash offsets. Generated development reports remain local and are excluded from Git. The test runner currently expects the standard Visual Studio Build Tools installation path.
 
-## Diagnostics
+## Logging: existing eChessGateway workflow
 
-Open **[BLE diagnostics](https://parlue.github.io/cer4all/debug.html)** in a browser supporting Web Bluetooth. It provides board/chip status, connection and traffic counters, live logs and text-file export through a separate BLE service.
+Use **Gateway Log** in the existing **eChessboards Android app**, exactly as with eChessGw. No browser diagnostics, local HTTP server or new configuration service is needed.
 
-- Service: `ce4c0000-5887-4d42-9888-31489f8ca144`
-- Status/control: `ce4c0001-5887-4d42-9888-31489f8ca144`
-- Log notifications: `ce4c0002-5887-4d42-9888-31489f8ca144`
+1. Disconnect the chess application from cer4all.
+2. Open Gateway Log in eChessboards and leave that screen open. Restart cer4all if needed.
+3. cer4all finds the app's `eChessGateway` advertisement, connects to its existing log service and uploads the stored log.
+4. Use the app's existing recording controls to enable logging. Disconnect the log session, reproduce the issue, then return to Gateway Log to download and save the result.
 
-Commands: `STATUS`, `FILTER 0`, `FILTER 1`, `LEDS AUTO`, `LEDS MONO`, `LEDS RGB`. Change settings before the application's NUS notifications are active. Settings are RAM-only and reset on reboot. Diagnostics do not archive raw piece IDs.
+The module is the BLE client; the Android app is the GATT server. UUIDs, framing and commands match eChessGw:
 
-To serve the web tools locally:
+- Service: `e5c40000-6c4f-4a3b-9d2e-6b1a7f0c0001`
+- Log writes: `e5c40001-6c4f-4a3b-9d2e-6b1a7f0c0001`
+- Command notifications: `e5c40002-6c4f-4a3b-9d2e-6b1a7f0c0001`
+- Upload: `GWLOG1 <bytes> rec=<0|1> fw=<version> up=<ms>`, log bytes, then `\n#GWLOG-END\n`.
+- Commands: `REC1`, `REC0`, `CLR`, `BYE`; successful recording/clear commands receive `#OK <command>`.
 
-```sh
-python -m http.server 8934 --bind 127.0.0.1 --directory docs
-```
+The latest log remains in a 12 KiB RAM ring. Recording is off by default; enabling it persists the setting and writes to two rotating flash files, approximately 48 KiB each. Recording switches off automatically after three subsequent recording boots or two hours. Log scanning is paused while a chess application is connected. File writes and log-upload pacing run in the low-priority logging task, not in the USB/BLE forwarding callbacks.
 
-Then open `http://localhost:8934`. Remote hosting requires HTTPS for browser device access.
+This firmware does not record chess games or implement the gateway's optional PGN commands. No raw piece IDs are archived. The existing app workflow still needs testing on physical hardware.
 
 ## Repository contents
 
-`src/` and `include/` contain the firmware, `test/` contains portable C++ tests, and `tools/` contains test and packaging scripts. `docs/` hosts the web flasher, diagnostics and firmware packages. Required third-party license notices are in `third_party/LICENSES/`.
+`src/` and `include/` contain the firmware, `test/` contains portable C++ tests, and `tools/` contains test and packaging scripts. `docs/` hosts the web flasher and firmware packages. Required third-party license notices are in `third_party/LICENSES/`.
 
 This is a separate project from eChessGw and eChessTactics.

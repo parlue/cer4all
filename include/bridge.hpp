@@ -11,8 +11,6 @@ bool receiveApp(const uint8_t *, size_t);
 void appSubscribed(bool);
 void wakeBleTx();
 void debug(const char *fmt, ...);
-size_t status(char *, size_t);
-void command(const char *);
 void startBle();
 bool bleSubscribed();
 size_t blePayload();
@@ -22,6 +20,4 @@ void disconnectApp();
 void startUsb();
 bool writeUsb(const uint8_t *, size_t);
 void bleBoardChanged();
-bool applicationBacklog();
-size_t notifyDebug(const uint8_t *, size_t);
 } // namespace cer4all

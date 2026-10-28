@@ -1,4 +1,5 @@
 #include "bridge.hpp"
+#include "gateway_log.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -9,7 +10,6 @@
 namespace cer4all {
 namespace {
 Ring<32768> toBle;
-Ring<8192> logs;
 struct Command {
     unsigned epoch;
     size_t n;
@@ -18,12 +18,9 @@ struct Command {
 MessageRing<16384> toUsb;
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 TaskHandle_t bleTask = nullptr, usbTask = nullptr;
-std::atomic<Model> physical{Model::Unknown}, model{Model::Unknown};
-std::atomic<bool> attached{false}, faulted{false}, resetRx{true}, filterOn{true};
-std::atomic<unsigned> receiveEpoch{0}, generation{0}, ledInput{unsigned(LedInput::Auto)};
-std::atomic<uint8_t> part{0};
-std::atomic<uint32_t> usbBytes{0}, bleBytes{0}, appBytes{0}, sentBytes{0}, overflows{0}, frames{0},
-    noise{0};
+std::atomic<Model> model{Model::Unknown};
+std::atomic<bool> attached{false}, faulted{false}, resetRx{true};
+std::atomic<unsigned> receiveEpoch{0}, generation{0};
 PositionPipe upstream;
 void signal(TaskHandle_t t) {
     if (t)
@@ -31,7 +28,6 @@ void signal(TaskHandle_t t) {
 }
 void fault(const char *why) {
     if (!faulted.exchange(true)) {
-        ++overflows;
         debug("FAULT %s; disconnect instead of forwarding an incomplete stream", why);
         disconnectApp();
     }
@@ -74,8 +70,6 @@ void emitUsb(const uint8_t *p, size_t n, void *ctx) {
         return;
     if (!writeUsb(p, n))
         fault("USB write failed");
-    else
-        sentBytes += n;
 }
 void bleWorker(void *) {
     uint8_t bytes[253];
@@ -96,7 +90,6 @@ void bleWorker(void *) {
             if (epoch == receiveEpoch.load())
                 toBle.consume(n);
             portEXIT_CRITICAL(&mux);
-            bleBytes += n;
         }
     }
 }
@@ -120,27 +113,10 @@ void usbWorker(void *) {
                 leds.reset();
                 epoch = command.epoch;
             }
-            leds.input = LedInput(ledInput.load());
             const auto previousErrors = leds.invalid;
             leds.feed(command.data, command.n, model.load(), emitUsb, &epoch);
             if (leds.invalid != previousErrors)
                 debug("Invalid LED frames %lu", (unsigned long)leds.invalid);
-        }
-    }
-}
-void logWorker(void *) {
-    uint8_t bytes[128];
-    for (;;) {
-        // Debug is deliberately lower priority and never waits in the application path.
-        vTaskDelay(pdMS_TO_TICKS(50));
-        portENTER_CRITICAL(&mux);
-        size_t n = logs.peek(bytes, sizeof(bytes));
-        portEXIT_CRITICAL(&mux);
-        if (n) {
-            size_t sent = notifyDebug(bytes, n);
-            portENTER_CRITICAL(&mux);
-            logs.consume(sent);
-            portEXIT_CRITICAL(&mux);
         }
     }
 }
@@ -150,13 +126,12 @@ void startBridge() {
         abort();
     if (xTaskCreate(usbWorker, "usb_pipe", 4096, nullptr, 8, &usbTask) != pdTRUE)
         abort();
-    if (xTaskCreate(logWorker, "debug_pipe", 3072, nullptr, 2, nullptr) != pdTRUE)
-        abort();
+    startGatewayLog();
 }
 void debug(const char *fmt, ...) {
     char line[224];
     const size_t prefix =
-        size_t(snprintf(line, sizeof(line), "[%llu ms] ",
+        size_t(snprintf(line, sizeof(line), "%llu ",
                         static_cast<unsigned long long>(esp_timer_get_time() / 1000)));
     va_list args;
     va_start(args, fmt);
@@ -166,16 +141,10 @@ void debug(const char *fmt, ...) {
     line[len++] = '\n';
     line[len] = 0;
     printf("%s", line);
-    portENTER_CRITICAL(&mux);
-    if (logs.free() < len)
-        logs.consume(len - logs.free());
-    logs.push(reinterpret_cast<uint8_t *>(line), len);
-    portEXIT_CRITICAL(&mux);
+    appendGatewayLog(line, len);
 }
 void usbSession(Model m, uint8_t p) {
-    physical = m;
     model = m;
-    part = p;
     resetRx = true;
     faulted = false;
     portENTER_CRITICAL(&mux);
@@ -207,24 +176,22 @@ void usbDisconnected() {
     bleBoardChanged();
 }
 bool receiveUsb(const uint8_t *p, size_t n) {
+    gatewayLogTraffic();
     if (resetRx.exchange(false)) {
         upstream.reset(model.load());
-        frames = 0;
     }
-    usbBytes += n;
     EmitBlock block;
     const Model before = upstream.type();
-    upstream.feed(p, n, filterOn.load(), stageOutput, &block);
+    upstream.feed(p, n, true, stageOutput, &block);
     flushBlock(block);
     if (upstream.type() != before) {
         model = upstream.type();
         debug("8-value protocol: Sentio (no invented IDs)");
     }
-    frames = upstream.frames();
-    noise = upstream.filtered();
     return true;
 }
 bool receiveApp(const uint8_t *p, size_t n) {
+    gatewayLogTraffic();
     if (!attached || faulted)
         return false;
     portENTER_CRITICAL(&mux);
@@ -234,7 +201,6 @@ bool receiveApp(const uint8_t *p, size_t n) {
         fault("USB queue full");
         return false;
     }
-    appBytes += n;
     signal(usbTask);
     return true;
 }
@@ -265,41 +231,5 @@ unsigned rxEpoch() {
 }
 void wakeBleTx() {
     signal(bleTask);
-}
-bool applicationBacklog() {
-    portENTER_CRITICAL(&mux);
-    bool pending = toBle.size() != 0;
-    portEXIT_CRITICAL(&mux);
-    return pending;
-}
-size_t status(char *p, size_t n) {
-    return size_t(snprintf(
-        p, n,
-        "{\"firmware\":\"0.1.0-dev\",\"board\":\"%s\",\"usb_part\":%u,\"usb\":%s,\"mtu_payload\":%"
-        "u,\"usb_rx\":%lu,\"ble_tx\":%lu,\"ble_rx\":%lu,\"usb_tx\":%lu,\"frames320\":%lu,"
-        "\"filtered\":%lu,\"faults\":%lu,\"filter\":%s,\"led_input\":%u}",
-        name(model.load()), unsigned(part.load()), attached ? "true" : "false",
-        unsigned(blePayload()), (unsigned long)usbBytes.load(), (unsigned long)bleBytes.load(),
-        (unsigned long)appBytes.load(), (unsigned long)sentBytes.load(),
-        (unsigned long)frames.load(), (unsigned long)noise.load(), (unsigned long)overflows.load(),
-        filterOn ? "true" : "false", ledInput.load()));
-}
-void command(const char *p) {
-    if (strcmp(p, "STATUS") == 0) {
-        char text[512];
-        status(text, sizeof(text));
-        debug("%s", text);
-    } else if (strcmp(p, "FILTER 0") == 0 || strcmp(p, "FILTER 1") == 0) {
-        filterOn = p[7] == '1';
-        resetRx = true;
-        debug("Filter %s", filterOn ? "on" : "off");
-    } else if (strcmp(p, "LEDS AUTO") == 0)
-        ledInput = unsigned(LedInput::Auto);
-    else if (strcmp(p, "LEDS MONO") == 0)
-        ledInput = unsigned(LedInput::Mono);
-    else if (strcmp(p, "LEDS RGB") == 0)
-        ledInput = unsigned(LedInput::Rgb);
-    else
-        debug("Unknown debug command");
 }
 } // namespace cer4all

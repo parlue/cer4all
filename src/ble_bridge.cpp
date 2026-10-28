@@ -1,4 +1,5 @@
 #include "bridge.hpp"
+#include "gateway_log.hpp"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -25,15 +26,8 @@ const ble_uuid128_t rxUuid = BLE_UUID128_INIT(0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5
                                               0xf3, 0xa3, 0xb5, 0x02, 0x00, 0x40, 0x6e);
 const ble_uuid128_t txUuid = BLE_UUID128_INIT(0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0, 0x93,
                                               0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e);
-// Debug service is deliberately NOT Nordic UART.
-const ble_uuid128_t diagnostic = BLE_UUID128_INIT(0x44, 0xa1, 0x8c, 0x9f, 0x48, 0x31, 0x88, 0x98,
-                                                  0x42, 0x4d, 0x87, 0x58, 0x00, 0x00, 0x4c, 0xce);
-const ble_uuid128_t statusUuid = BLE_UUID128_INIT(0x44, 0xa1, 0x8c, 0x9f, 0x48, 0x31, 0x88, 0x98,
-                                                  0x42, 0x4d, 0x87, 0x58, 0x01, 0x00, 0x4c, 0xce);
-const ble_uuid128_t logUuid = BLE_UUID128_INIT(0x44, 0xa1, 0x8c, 0x9f, 0x48, 0x31, 0x88, 0x98, 0x42,
-                                               0x4d, 0x87, 0x58, 0x02, 0x00, 0x4c, 0xce);
-uint16_t txHandle = 0, statusHandle = 0, logHandle = 0;
-std::atomic<uint16_t> app{BLE_HS_CONN_HANDLE_NONE}, dbg{BLE_HS_CONN_HANDLE_NONE};
+uint16_t txHandle = 0;
+std::atomic<uint16_t> app{BLE_HS_CONN_HANDLE_NONE}, peer{BLE_HS_CONN_HANDLE_NONE};
 std::atomic<bool> subscribed{false}, synced{false};
 uint8_t addrType = 0;
 // Serialize transmission with GAP callbacks on NimBLE's own host event queue.
@@ -70,12 +64,6 @@ void advertise() {
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc)
         return;
-    ble_hs_adv_fields scan{};
-    scan.uuids128 = const_cast<ble_uuid128_t *>(&diagnostic);
-    scan.num_uuids128 = 1;
-    scan.uuids128_is_complete = 1;
-    if (ble_gap_adv_rsp_set_fields(&scan))
-        return;
     ble_gap_adv_params params{};
     params.conn_mode = BLE_GAP_CONN_MODE_UND;
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
@@ -85,27 +73,7 @@ void advertise() {
     if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_ENOMEM)
         debug("BLE advertising rc=%d", rc);
 }
-int access(uint16_t connection, uint16_t attribute, ble_gatt_access_ctxt *ctx, void *) {
-    if (attribute == statusHandle) {
-        if (ctx->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-            char text[512];
-            size_t n = status(text, sizeof(text));
-            return os_mbuf_append(ctx->om, text, std::min(n, sizeof(text) - 1)) == 0
-                       ? 0
-                       : BLE_ATT_ERR_INSUFFICIENT_RES;
-        }
-        if (ctx->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-            char text[65]{};
-            uint16_t len = 0;
-            if (OS_MBUF_PKTLEN(ctx->om) >= sizeof(text) ||
-                ble_hs_mbuf_to_flat(ctx->om, text, sizeof(text) - 1, &len) != 0)
-                return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-            if (bleSubscribed())
-                return BLE_ATT_ERR_WRITE_NOT_PERMITTED; // no debug reconfiguration during a game
-            command(text);
-            return 0;
-        }
-    }
+int access(uint16_t connection, uint16_t, ble_gatt_access_ctxt *ctx, void *) {
     if (ctx->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
         return BLE_ATT_ERR_READ_NOT_PERMITTED;
     if (app.load() != BLE_HS_CONN_HANDLE_NONE && app.load() != connection)
@@ -121,8 +89,8 @@ int access(uint16_t connection, uint16_t attribute, ble_gatt_access_ctxt *ctx, v
     return receiveApp(bytes, len) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 ble_gatt_chr_def nusCharacteristics[3]{};
-ble_gatt_chr_def diagnosticCharacteristics[3]{};
-ble_gatt_svc_def services[3]{};
+
+ble_gatt_svc_def services[2]{};
 void configureServices() {
     nusCharacteristics[0].uuid = &rxUuid.u;
     nusCharacteristics[0].access_cb = access;
@@ -130,24 +98,16 @@ void configureServices() {
     nusCharacteristics[1].uuid = &txUuid.u;
     nusCharacteristics[1].flags = BLE_GATT_CHR_F_NOTIFY;
     nusCharacteristics[1].val_handle = &txHandle;
-    diagnosticCharacteristics[0].uuid = &statusUuid.u;
-    diagnosticCharacteristics[0].access_cb = access;
-    diagnosticCharacteristics[0].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE;
-    diagnosticCharacteristics[0].val_handle = &statusHandle;
-    diagnosticCharacteristics[1].uuid = &logUuid.u;
-    diagnosticCharacteristics[1].flags = BLE_GATT_CHR_F_NOTIFY;
-    diagnosticCharacteristics[1].val_handle = &logHandle;
     services[0].type = BLE_GATT_SVC_TYPE_PRIMARY;
     services[0].uuid = &nus.u;
     services[0].characteristics = nusCharacteristics;
-    services[1].type = BLE_GATT_SVC_TYPE_PRIMARY;
-    services[1].uuid = &diagnostic.u;
-    services[1].characteristics = diagnosticCharacteristics;
+
 }
 int gap(ble_gap_event *e, void *) {
     switch (e->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (e->connect.status == 0) {
+            peer = e->connect.conn_handle;
             ble_gap_upd_params params{};
             params.itvl_min = 6;
             params.itvl_max = 12;
@@ -159,13 +119,11 @@ int gap(ble_gap_event *e, void *) {
         break;
     case BLE_GAP_EVENT_DISCONNECT: {
         uint16_t h = e->disconnect.conn.conn_handle;
+        if (peer == h) peer = BLE_HS_CONN_HANDLE_NONE;
         if (app == h) {
             subscribed = false;
             app = BLE_HS_CONN_HANDLE_NONE;
             appSubscribed(false);
-        }
-        if (dbg == h) {
-            dbg = BLE_HS_CONN_HANDLE_NONE;
         }
         debug("BLE disconnected handle=%u reason=%d", h, e->disconnect.reason);
         advertise();
@@ -187,12 +145,6 @@ int gap(ble_gap_event *e, void *) {
                 app = BLE_HS_CONN_HANDLE_NONE;
                 appSubscribed(false);
             }
-        } else if (e->subscribe.attr_handle == logHandle) {
-            if (e->subscribe.cur_notify) {
-                if (dbg == BLE_HS_CONN_HANDLE_NONE || dbg == e->subscribe.conn_handle)
-                    dbg = e->subscribe.conn_handle;
-            } else if (dbg == e->subscribe.conn_handle)
-                dbg = BLE_HS_CONN_HANDLE_NONE;
         }
         break;
     case BLE_GAP_EVENT_NOTIFY_TX:
@@ -200,7 +152,7 @@ int gap(ble_gap_event *e, void *) {
             debug("BLE notify failure rc=%d", e->notify_tx.status);
             disconnectApp();
         }
-        // Debug completions also release shared mbufs; retry any queued application data.
+        // Retry pending application data when notification buffers become available.
         wakeBleTx();
         break;
     case BLE_GAP_EVENT_MTU:
@@ -218,14 +170,16 @@ int gap(ble_gap_event *e, void *) {
 void sync() {
     if (ble_hs_id_infer_auto(0, &addrType) == 0) {
         synced = true;
+        gatewayLogReady(true);
         advertise();
     }
 }
 void reset(int reason) {
     synced = false;
+    gatewayLogReady(false);
     subscribed = false;
     app = BLE_HS_CONN_HANDLE_NONE;
-    dbg = BLE_HS_CONN_HANDLE_NONE;
+    peer = BLE_HS_CONN_HANDLE_NONE;
     appSubscribed(false);
     debug("BLE host reset %d", reason);
 }
@@ -279,18 +233,7 @@ void disconnectApp() {
 void bleBoardChanged() {
     advertise();
 }
-size_t notifyDebug(const uint8_t *p, size_t n) {
-    uint16_t h = dbg.load();
-    if (h == BLE_HS_CONN_HANDLE_NONE)
-        return 0;
-    // Application owns scarce notification buffers. Debug is best-effort only.
-    if (applicationBacklog())
-        return 0;
-    size_t max = ble_att_mtu(h) > 3 ? ble_att_mtu(h) - 3 : 20;
-    n = std::min(n, max);
-    os_mbuf *b = ble_hs_mbuf_from_flat(p, n);
-    if (!b)
-        return 0;
-    return ble_gatts_notify_custom(h, logHandle, b) == 0 ? n : 0;
+bool applicationConnected() {
+    return app.load() != BLE_HS_CONN_HANDLE_NONE || peer.load() != BLE_HS_CONN_HANDLE_NONE;
 }
 } // namespace cer4all

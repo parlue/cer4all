@@ -2,6 +2,7 @@
 #error Core tests require active assertions
 #endif
 #include "core.hpp"
+#include "log_protocol.hpp"
 #include <cassert>
 #include <vector>
 #include <string>
@@ -30,6 +31,26 @@ std::string line(unsigned values) {
     return s + "\r\n";
 }
 int main() {
+    // Exact existing gateway framing, fragmented and batched command notifications.
+    char header[128], command[32];
+    logHeader(header, sizeof(header), 123, true, "0.1.1-dev", 456);
+    assert(std::string(header) == "GWLOG1 123 rec=1 fw=0.1.1-dev up=456\n");
+    const std::string cmds = "REC1\r\nREC0\nCLR\nBYE\nPING\n";
+    for (size_t split = 1; split <= cmds.size(); ++split) {
+        LogCommands parser;
+        for (size_t at = 0; at < cmds.size(); at += split)
+            parser.feed(reinterpret_cast<const uint8_t *>(cmds.data()+at), std::min(split, cmds.size()-at));
+        for (const char *want : {"REC1", "REC0", "CLR", "BYE", "PING"}) {
+            assert(parser.next(command)); assert(std::string(command) == want);
+        }
+        assert(!parser.next(command));
+    }
+    LogCommands parser;
+    std::string malformedCommand(100, 'x'); malformedCommand += "REC1\nREC0\n";
+    parser.feed(reinterpret_cast<const uint8_t *>(malformedCommand.data()), malformedCommand.size());
+    assert(parser.next(command) && std::string(command) == "REC0");
+    assert(!parser.next(command));
+
     assert(fromPart(3) == Model::Certabo);
     for (int p : {0x20, 0x21, 0x22})
         assert(fromPart(uint8_t(p)) == Model::Spectrum);
