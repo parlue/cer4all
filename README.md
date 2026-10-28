@@ -2,7 +2,7 @@
 
 USB-to-Bluetooth Low Energy bridge for Certabo, Tabutronic Spectrum and Sentio chessboards, running on ESP32-S3.
 
-**Development firmware: 0.1.2-dev.** Fixes a BLE startup failure affecting both board types: NimBLE requires an access callback on notify-only characteristics. Hardware retesting is still pending.
+**Development firmware: 0.1.3-dev.** Removes the additional Spectrum piece-data filter and preserves repeated Spectrum LED commands. Certabo and Spectrum connection succeeded in tester feedback for 0.1.2-dev; this forwarding correction still needs hardware retesting.
 
 ## Web flasher
 
@@ -45,7 +45,7 @@ The chip mapping targets the boards used for this project. It is not a guarantee
 - One chess application connection; the existing eChessGateway app is used separately for log download.
 - Ordered, bounded queues: 32 KiB USB-to-BLE and 16 KiB application-to-USB. Queue exhaustion causes an explicit error and disconnect rather than silent truncation.
 
-Certabo, Sentio and unknown boards receive native LED bytes unchanged. Spectrum accepts native 247-byte RGB frames and converts standard 8-byte masks to the four corner LEDs of each square. Converted masks use blue at 80% brightness. Identical completed Spectrum LED outputs are suppressed without a timed delay. There is no move interpretation, blink scheduling or field accumulation in the bridge.
+Certabo, Sentio and unknown boards receive native LED bytes unchanged. Spectrum accepts native 247-byte RGB frames and converts standard 8-byte masks to the four corner LEDs of each square. Converted masks use blue at 80% brightness. Every completed Spectrum LED command is forwarded, including identical repeats and keep-alives. There is no move interpretation, blink scheduling or field accumulation in the bridge.
 
 A 247-byte RGB frame takes approximately 64 ms over the 38400-baud serial link. Sustained rates above roughly 15 frames per second can therefore create a backlog.
 
@@ -53,11 +53,9 @@ A 247-byte RGB frame takes approximately 64 ms over the 38400-baud serial link. 
 
 A single 8-byte BLE write is treated as a monochrome mask; otherwise `FF55` starts an RGB frame. Arbitrary fragmentation can be ambiguous because monochrome masks have no frame signature. Standard complete RGB frames and 20-byte RGB fragments are supported. No runtime configuration interface is provided. RGB-to-monochrome conversion is not implemented.
 
-### Runtime noise filtering
+### Transparent board data
 
-No piece IDs or prefix lists are built in. The Spectrum filter learns stable IDs in RAM after three consistent observations without duplicate candidates on another square. Known IDs and empty readings then pass immediately. Unstable unknown values can hold the previous square contents for at most three observations. Learned IDs are cleared when USB reconnects.
-
-Stable sensor noise can resemble a real new piece; filtering cannot reliably distinguish every such case. There is no user-facing filter setting.
+USB board data is forwarded byte-for-byte for every model, including arbitrary piece IDs, duplicate IDs, sensor-noise readings, acknowledgements and whitespace. No piece learning, temporal filtering, replacement with empty fields or retention of previous positions occurs in the interface. The chess application remains responsible for calibration and handling sensor noise, just as with direct USB. Passive Sentio detection observes the stream without changing it.
 
 ## Building
 

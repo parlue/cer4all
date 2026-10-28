@@ -18,12 +18,6 @@ void collect(const uint8_t *p, size_t n, void *ctx) {
 std::string text(const Bytes &b) {
     return std::string(b.begin(), b.end());
 }
-Bytes feedNoise(NoiseFilter &f, const std::string &s) {
-    Bytes b;
-    for (uint8_t c : s)
-        f.feed(c, collect, &b);
-    return b;
-}
 std::string line(unsigned values) {
     std::string s = ":";
     for (unsigned i = 0; i < values; ++i)
@@ -180,7 +174,7 @@ int main() {
         l.feed(sequence.data(), sequence.size(), m, collect, &out);
         assert(out == sequence);
     }
-    // Spectrum RGB reassembly for arbitrary fragment boundaries, duplicates suppressed.
+    // Native RGB reassembly preserves repeated commands at every fragment boundary.
     for (size_t chunk = 1; chunk <= 253; ++chunk) {
         Leds l;
         l.input = LedInput::Rgb;
@@ -189,7 +183,8 @@ int main() {
             l.feed(rgb + i, std::min(chunk, 247 - i), Model::Spectrum, collect, &out);
         assert(out == Bytes(rgb, rgb + 247));
         l.feed(rgb, 247, Model::Spectrum, collect, &out);
-        assert(out.size() == 247);
+        assert(out.size() == 494);
+        assert(Bytes(out.begin()+247,out.end()) == Bytes(rgb,rgb+247));
     }
     for (size_t chunk : {size_t(20), size_t(253)}) {
         Leds l;
@@ -218,7 +213,8 @@ int main() {
         for (size_t i = 0; i < data.size(); i += chunk)
             l.feed(data.data() + i, std::min(chunk, data.size() - i), Model::Spectrum, collect,
                    &out);
-        assert(out == Bytes(rgb, rgb + 247));
+        Bytes twice(rgb,rgb+247);twice.insert(twice.end(),rgb,rgb+247);
+        assert(out == twice);
     }
     Leds invalid;
     invalid.input = LedInput::Rgb;
@@ -233,39 +229,6 @@ int main() {
     invalid.feed(rgb, 247, Model::Spectrum, collect, &invalidOut);
     assert(invalidOut.empty() && invalid.invalid == 1);
     rgb[0] = 255;
-    // Learn arbitrary, user-owned tags from stability; NO prefix list.
-    NoiseFilter noise;
-    for (std::string id : {"5 0 195 33 252", "7 0 136 4 42", "93 12 1 2 3", "173 99 255 0 12"}) {
-        noise.reset();
-        for (int i = 0; i < 2; ++i)
-            assert(text(feedNoise(noise, ":" + id + " \n")) == ":0 0 0 0 0 \n");
-        assert(text(feedNoise(noise, ":" + id + " \n")) == ":" + id + " \n");
-        // Known tags move immediately to another field, no 3-scan delay on moves.
-        assert(text(feedNoise(noise, ":0 0 0 0 0 " + id + " \n")) == ":0 0 0 0 0 " + id + " \n");
-    }
-    noise.reset();
-    for (int i = 0; i < 3; ++i)
-        feedNoise(noise, ":173 99 255 0 12 \n");
-    // Field-level latency: after FIVE values, before a complete 64-field record.
-    Bytes partial;
-    for (uint8_t c : std::string(":173 99 255 0 12 "))
-        noise.feed(c, collect, &partial);
-    assert(text(partial) == ":173 99 255 0 12 ");
-    // Varying unknown readings hold the last known tag for at most three scans.
-    for (int i = 0; i < 3; ++i)
-        assert(text(feedNoise(noise, ":" + std::to_string(100 + i) + " 0 0 0 0 \n")) ==
-               ":173 99 255 0 12 \n");
-    assert(text(feedNoise(noise, ":103 0 0 0 0 \n")) == ":0 0 0 0 0 \n");
-    // A real empty reading clears immediately, not after a hold timer.
-    feedNoise(noise, ":173 99 255 0 12 \n");
-    assert(text(feedNoise(noise, ":0 0 0 0 0 \n")) == ":0 0 0 0 0 \n");
-    noise.reset();
-    assert(text(feedNoise(noise, "D\r\n")) == "D\r\n");
-    // Repeated phantom IDs on multiple fields must not become learned tags.
-    noise.reset();
-    for (int i = 0; i < 5; ++i)
-        assert(text(feedNoise(noise, ":117 33 8 0 1 117 33 8 0 1 \n")) ==
-               ":0 0 0 0 0 0 0 0 0 0 \n");
     // Actual upstream router: every byte of the FIRST Sentio line survives,
     // even if its USB chip initially suggested Spectrum. No learned fake IDs.
     for (Model hint : {Model::Unknown, Model::Certabo, Model::Spectrum})
@@ -276,7 +239,7 @@ int main() {
             std::string stream = ":128 1 255 0 34 56 78 90\n:0 1 2 3 4 5 6 7\n";
             for (size_t i = 0; i < stream.size(); i += chunk)
                 pipe.feed(reinterpret_cast<const uint8_t *>(stream.data() + i),
-                          std::min(chunk, stream.size() - i), true, collect, &out);
+                          std::min(chunk, stream.size() - i), collect, &out);
             assert(text(out) == stream && pipe.type() == Model::Sentio && pipe.frames() == 0);
         }
     // L/D acknowledgements may be interleaved with a position stream.
@@ -285,24 +248,27 @@ int main() {
     for (uint8_t c : std::string(":0 1 D2 3 L4 5 6 7\n"))
         observed += acknowledgements.feed(c);
     assert(observed == 8);
-    // Full normal-board protocol is byte-identical, including L/D and whitespace.
-    for (Model hint : {Model::Unknown, Model::Certabo}) {
-        PositionPipe pipe;
-        pipe.reset(hint);
-        Bytes out;
-        std::string stream = "L\r\n" + line(320) + line(320);
-        pipe.feed(reinterpret_cast<const uint8_t *>(stream.data()), stream.size(), true, collect,
-                  &out);
-        assert(text(out) == stream && pipe.frames() == 2 && pipe.type() == hint);
-    }
-    // Spectrum passthrough with the optional temporal filter disabled.
-    PositionPipe pipe;
-    pipe.reset(Model::Spectrum);
-    Bytes raw;
-    std::string stream = "D\r\n" + line(320) + line(320);
-    pipe.feed(reinterpret_cast<const uint8_t *>(stream.data()), stream.size(), false, collect,
-              &raw);
-    assert(text(raw) == stream && pipe.frames() == 2);
-    std::cout << "PASS: chip detection, queue wrap/overflow, 8/320 framing, RGB mapping, all "
-                 "fragment sizes, native passthrough, dedup, field streaming and noise hold\n";
+    // All board streams remain identical, immediately at every USB boundary.
+    // Include changing arbitrary IDs, duplicates, noise, whitespace and incomplete records.
+    for (Model hint : {Model::Unknown, Model::Certabo, Model::Spectrum, Model::Sentio})
+        for (size_t chunk=1;chunk<=253;++chunk) {
+            PositionPipe pipe;pipe.reset(hint);Bytes out;
+            std::string stream="D\r\n"+line(320)+line(320)+
+                ":173 99 255 0 12 173 99 255 0 12 L128 0 0 0 0 ";
+            for(size_t i=0;i<stream.size();i+=chunk) {
+                size_t n=std::min(chunk,stream.size()-i);
+                pipe.feed(reinterpret_cast<const uint8_t *>(stream.data()+i),n,collect,&out);
+                assert(text(out)==stream.substr(0,i+n));
+            }
+            assert(pipe.frames()==2 && pipe.type()==hint);
+        }
+    // Consecutive identical mono requests on Spectrum also remain separate commands.
+    Leds repeated;Bytes copies;
+    repeated.feed(mask,8,Model::Spectrum,collect,&copies);
+    repeated.feed(mask,8,Model::Spectrum,collect,&copies);
+    assert(copies.size()==494);
+    assert(std::memcmp(copies.data(),copies.data()+247,247)==0);
+    std::cout << "PASS: chip detection, queue wrap/overflow, 8/320 framing, RGB mapping, "
+                 "native Certabo passthrough, all-model immediate byte identity, "
+                 "RGB fragmentation and repeated LED commands preserved\n";
 }

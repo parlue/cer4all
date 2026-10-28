@@ -182,7 +182,7 @@ bool receiveUsb(const uint8_t *p, size_t n) {
     }
     EmitBlock block;
     const Model before = upstream.type();
-    upstream.feed(p, n, true, stageOutput, &block);
+    upstream.feed(p, n, stageOutput, &block);
     flushBlock(block);
     if (upstream.type() != before) {
         model = upstream.type();

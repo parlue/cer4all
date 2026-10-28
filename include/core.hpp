@@ -157,8 +157,8 @@ inline void rgbFromMask(const uint8_t mask[8], uint8_t frame[247]) {
 }
 enum class LedInput : uint8_t { Auto, Mono, Rgb };
 class Leds {
-    std::array<uint8_t, 247> pending_{}, last_{};
-    size_t used_ = 0, lastSize_ = 0;
+    std::array<uint8_t, 247> pending_{};
+    size_t used_ = 0;
     bool rgb_ = false;
     void complete(Model model, Emit out, void *ctx) {
         uint8_t converted[247];
@@ -177,13 +177,8 @@ class Leds {
             bytes = converted;
             n = 247;
         }
-        // Only Spectrum suppresses exact repeats. No sleep, merging or field accumulation.
-        if (model != Model::Spectrum || n != lastSize_ ||
-            std::memcmp(bytes, last_.data(), n) != 0) {
-            out(bytes, n, ctx);
-            std::memcpy(last_.data(), bytes, n);
-            lastSize_ = n;
-        }
+        // Preserve every completed command, including refreshes and blink repetitions.
+        out(bytes, n, ctx);
         used_ = 0;
     }
 
@@ -191,7 +186,7 @@ class Leds {
     LedInput input = LedInput::Auto;
     uint32_t invalid = 0;
     void reset() {
-        used_ = lastSize_ = 0;
+        used_ = 0;
         rgb_ = false;
         invalid = 0;
     }
@@ -217,157 +212,15 @@ class Leds {
         }
     }
 };
-// Spectrum-only field streaming: buffers at most one 5-byte ID, never a board.
-class NoiseFilter {
-    using Id = std::array<uint8_t, 5>;
-    std::array<Id, 64> last_{}, candidate_{};
-    std::array<uint8_t, 64> hold_{}, votes_{};
-    std::array<Id, 128> learned_{};
-    size_t learnedCount_ = 0;
-    bool active_ = false, number_ = false;
-    unsigned field_ = 0, index_ = 0, value_ = 0;
-    Id id_{};
-    char raw_[32]{};
-    size_t rawSize_ = 0;
-    static bool zero(const Id &id) {
-        return id == Id{};
-    }
-    bool known(const Id &id) const {
-        for (size_t i = 0; i < learnedCount_; ++i)
-            if (learned_[i] == id)
-                return true;
-        return false;
-    }
-    void emitRaw(Emit emit, void *ctx) {
-        if (rawSize_)
-            emit(reinterpret_cast<uint8_t *>(raw_), rawSize_, ctx);
-        rawSize_ = 0;
-        index_ = 0;
-        number_ = false;
-        value_ = 0;
-    }
-    void field(Emit emit, void *ctx) {
-        Id clean = id_;
-        if (zero(id_) || known(id_)) {
-            hold_[field_] = votes_[field_] = 0;
-            candidate_[field_] = {};
-        } else {
-            if (candidate_[field_] != id_) {
-                candidate_[field_] = id_;
-                votes_[field_] = 0;
-            }
-            if (votes_[field_] < 3)
-                ++votes_[field_];
-            bool unique = true;
-            for (size_t i = 0; i < candidate_.size(); ++i)
-                if (i != field_ && votes_[i] && candidate_[i] == id_)
-                    unique = false;
-            if (votes_[field_] >= 3 && unique) {
-                // Learn live tag values, never a manufacturer/user-specific whitelist.
-                // A full table fails open for this stable tag instead of deleting a new user's
-                // pieces.
-                if (learnedCount_ < learned_.size())
-                    learned_[learnedCount_++] = id_;
-                hold_[field_] = 0;
-            } else {
-                ++filtered;
-                if (!zero(last_[field_]) && hold_[field_] < 3) {
-                    clean = last_[field_];
-                    ++hold_[field_];
-                } else
-                    clean = {};
-            }
-        }
-        last_[field_] = clean;
-        char text[24];
-        int len = std::snprintf(text, sizeof(text), "%u %u %u %u %u ", clean[0], clean[1], clean[2],
-                                clean[3], clean[4]);
-        emit(reinterpret_cast<uint8_t *>(text), size_t(len), ctx);
-        ++field_;
-        rawSize_ = index_ = 0;
-        number_ = false;
-        value_ = 0;
-        if (field_ == 64)
-            active_ = false;
-    }
-
-  public:
-    uint32_t filtered = 0;
-    void reset() {
-        *this = NoiseFilter{};
-    }
-    void feed(uint8_t c, Emit emit, void *ctx) {
-        if (c == 'L' || c == 'D') {
-            emit(&c, 1, ctx);
-            return;
-        }
-        if (c == ':') {
-            emitRaw(emit, ctx);
-            active_ = true;
-            field_ = 0;
-            emit(&c, 1, ctx);
-            return;
-        }
-        if (!active_) {
-            emit(&c, 1, ctx);
-            return;
-        }
-        if (c >= '0' && c <= '9') {
-            if (rawSize_ == sizeof(raw_)) {
-                emitRaw(emit, ctx);
-                active_ = false;
-                emit(&c, 1, ctx);
-                return;
-            }
-            raw_[rawSize_++] = char(c);
-            number_ = true;
-            value_ = value_ * 10 + c - '0';
-            if (value_ > 255) {
-                emitRaw(emit, ctx);
-                active_ = false;
-            }
-            return;
-        }
-        if (c == ' ' || c == '\r' || c == '\n') {
-            if (number_) {
-                id_[index_++] = uint8_t(value_);
-                number_ = false;
-                value_ = 0;
-            }
-            if (index_ == 5)
-                field(emit, ctx);
-            else if (c == ' ') {
-                if (rawSize_ < sizeof(raw_))
-                    raw_[rawSize_++] = ' ';
-                else {
-                    emitRaw(emit, ctx);
-                    active_ = false;
-                }
-            }
-            if (c != ' ') {
-                emitRaw(emit, ctx);
-                active_ = false;
-                emit(&c, 1, ctx);
-            }
-            return;
-        }
-        emitRaw(emit, ctx);
-        active_ = false;
-        emit(&c, 1, ctx);
-    }
-};
 // USB-side protocol routing, shared by firmware and host regression tests.
 class PositionPipe {
     Observer observer_;
-    NoiseFilter filter_;
     Model type_ = Model::Unknown;
     uint32_t frames_ = 0;
-    static void discard(const uint8_t *, size_t, void *) {}
 
   public:
     void reset(Model type) {
         observer_.reset();
-        filter_.reset();
         type_ = type;
         frames_ = 0;
     }
@@ -377,27 +230,18 @@ class PositionPipe {
     uint32_t frames() const {
         return frames_;
     }
-    uint32_t filtered() const {
-        return filter_.filtered;
-    }
-    void feed(const uint8_t *bytes, size_t n, bool enabled, Emit emit, void *ctx) {
+    void feed(const uint8_t *bytes, size_t n, Emit emit, void *ctx) {
+        // Observation may select Sentio, but never edits or delays the stream.
         for (size_t i = 0; i < n; ++i) {
             const auto c = bytes[i];
             unsigned complete = observer_.feed(c);
-            const bool apply = enabled && type_ == Model::Spectrum && frames_ != 0;
-            if (type_ == Model::Spectrum) {
-                filter_.feed(c, apply ? emit : discard, ctx);
-                if (!apply)
-                    emit(&c, 1, ctx);
-            } else
-                emit(&c, 1, ctx);
             if (complete == 8 && type_ != Model::Sentio) {
                 type_ = Model::Sentio;
-                filter_.reset();
             }
             if (complete == 320)
                 ++frames_;
         }
+        emit(bytes, n, ctx);
     }
 };
 } // namespace cer4all
