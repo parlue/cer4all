@@ -3,6 +3,7 @@
 #endif
 #include "core.hpp"
 #include "log_protocol.hpp"
+#include "queue_probe.hpp"
 #include <cassert>
 #include <vector>
 #include <string>
@@ -25,6 +26,28 @@ std::string line(unsigned values) {
     return s + "\r\n";
 }
 int main() {
+    // Queue telemetry observes completion, including in-flight writes, and wraps time safely.
+    QueueProbe probe;
+    probe.push(64, 100);
+    probe.push(64, 101);
+    probe.complete(32, 110);
+    auto w = probe.window(120);
+    assert(w.pending == 96 && w.high == 128 && w.waitMs == 20);
+    probe.complete(32, 125);
+    w = probe.window(130);
+    assert(w.pending == 64 && w.waitMs == 25);
+    probe.push(8, 140);
+    probe.complete(64, 150);
+    assert(probe.window(160).waitMs == 20); // marker waits for the final 8 bytes
+    probe.complete(8, 170);
+    w = probe.window(180);
+    assert(w.pending == 0 && w.waitMs == 30);
+    probe.clear();
+    probe.push(1, UINT32_MAX - 4);
+    probe.complete(1, 5);
+    assert(probe.window(6).waitMs == 10);
+    probe.clear();
+    assert(probe.window(1000).pending == 0 && probe.window(1000).waitMs == 0);
     // Exact existing gateway framing, fragmented and batched command notifications.
     char header[128], command[32];
     logHeader(header, sizeof(header), 123, true, "0.1.1-dev", 456);

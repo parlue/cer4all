@@ -2,7 +2,7 @@
 
 USB-to-Bluetooth Low Energy bridge for Certabo, Tabutronic Spectrum and Sentio chessboards, running on ESP32-S3.
 
-**Development firmware: 0.1.3-dev.** Removes the additional Spectrum piece-data filter and preserves repeated Spectrum LED commands. Certabo and Spectrum connection succeeded in tester feedback for 0.1.2-dev; this forwarding correction still needs hardware retesting.
+**Development firmware: 0.1.4-dev.** Requests BLE Data Length Extension (251 octets) and 2M PHY, retains the 7.5–15 ms interval request and logs negotiated parameters plus queue performance every five seconds. Board bytes and repeated LED commands remain unchanged. Host tests/builds do not establish hardware performance; Spectrum/WROOM retesting is required. See [PERFORMANCE.md](PERFORMANCE.md).
 
 ## Web flasher
 

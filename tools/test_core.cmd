@@ -8,4 +8,8 @@ cl /nologo /EHsc /std:c++17 /W4 /Iinclude test\core_test.cpp /Fe:build-tests\cor
 if errorlevel 1 exit /b 1
 build-tests\core_test.exe
 if errorlevel 1 exit /b 1
-python tools\record_test.py
+if exist "%USERPROFILE%\.platformio\penv\Scripts\python.exe" (
+  "%USERPROFILE%\.platformio\penv\Scripts\python.exe" tools\record_test.py
+) else (
+  python tools\record_test.py
+)

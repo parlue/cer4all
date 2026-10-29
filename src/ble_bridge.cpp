@@ -3,6 +3,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "host/ble_gap.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "os/os_mbuf.h"
@@ -49,6 +50,23 @@ void sendOnHost(ble_npl_event *) {
     xSemaphoreGive(txDone);
 }
 
+void logLink(uint16_t h, const char *reason) {
+    ble_gap_conn_desc d{};
+    if (ble_gap_conn_find(h, &d)) return;
+    uint8_t tx = 0, rx = 0;
+    int rc = ble_gap_read_le_phy(h, &tx, &rx);
+    debug("BLE link %s h=%u interval_us=%lu latency=%u mtu=%u phy_tx=%u phy_rx=%u phy_rc=%d",
+          reason, h, (unsigned long)d.conn_itvl * 1250, d.conn_latency,
+          ble_att_mtu(h), tx, rx, rc);
+}
+void requestFastInterval(uint16_t h) {
+    ble_gap_upd_params params{};
+    params.itvl_min = 6; // 7.5 ms; the central selects the actual interval.
+    params.itvl_max = 12; // 15 ms
+    params.supervision_timeout = 400;
+    int rc = ble_gap_update_params(h, &params);
+    debug("BLE interval request h=%u rc=%d", h, rc);
+}
 int gap(ble_gap_event *, void *);
 void advertise() {
     if (!synced || ble_gap_adv_active())
@@ -115,11 +133,17 @@ int gap(ble_gap_event *e, void *) {
     case BLE_GAP_EVENT_CONNECT:
         if (e->connect.status == 0) {
             peer = e->connect.conn_handle;
-            ble_gap_upd_params params{};
-            params.itvl_min = 6;
-            params.itvl_max = 12;
-            params.supervision_timeout = 400;
-            ble_gap_update_params(e->connect.conn_handle, &params);
+            // Stop any log discovery immediately; keep radio time for the board.
+            ble_gap_disc_cancel();
+            requestFastInterval(e->connect.conn_handle);
+            int dle = ble_gap_set_data_len(e->connect.conn_handle, 251, 2120);
+            int phy = ble_gap_set_prefered_le_phy(e->connect.conn_handle,
+                                                BLE_GAP_LE_PHY_2M_MASK,
+                                                BLE_GAP_LE_PHY_2M_MASK, 0);
+            // Unsupported/rejected optimizations leave the existing link usable.
+            debug("BLE transport request h=%u dle_rc=%d phy_rc=%d",
+                  e->connect.conn_handle, dle, phy);
+            logLink(e->connect.conn_handle, "connect");
             debug("BLE connected handle=%u", e->connect.conn_handle);
         }
         advertise();
@@ -147,6 +171,11 @@ int gap(ble_gap_event *e, void *) {
                 app = h;
                 subscribed = true;
                 appSubscribed(true);
+                // Some centrals negotiate services before honoring our parameters.
+                ble_gap_conn_desc d{};
+                if (!ble_gap_conn_find(h, &d) && (d.conn_itvl > 12 || d.conn_latency))
+                    requestFastInterval(h);
+                logLink(h, "subscribe");
             } else if (app == h) {
                 subscribed = false;
                 app = BLE_HS_CONN_HANDLE_NONE;
@@ -161,6 +190,21 @@ int gap(ble_gap_event *e, void *) {
         }
         // Retry pending application data when notification buffers become available.
         wakeBleTx();
+        break;
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        debug("BLE interval result h=%u status=%d", e->conn_update.conn_handle,
+              e->conn_update.status);
+        logLink(e->conn_update.conn_handle, "update");
+        break;
+    case BLE_GAP_EVENT_DATA_LEN_CHG:
+        debug("BLE DLE h=%u tx_octets=%u rx_octets=%u tx_us=%u rx_us=%u",
+              e->data_len_chg.conn_handle, e->data_len_chg.max_tx_octets,
+              e->data_len_chg.max_rx_octets, e->data_len_chg.max_tx_time,
+              e->data_len_chg.max_rx_time);
+        break;
+    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
+        debug("BLE PHY h=%u status=%d tx=%u rx=%u", e->phy_updated.conn_handle,
+              e->phy_updated.status, e->phy_updated.tx_phy, e->phy_updated.rx_phy);
         break;
     case BLE_GAP_EVENT_MTU:
         debug("BLE MTU handle=%u mtu=%u", e->mtu.conn_handle, e->mtu.value);

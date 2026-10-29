@@ -1,5 +1,6 @@
 #include "bridge.hpp"
 #include "gateway_log.hpp"
+#include "queue_probe.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -22,6 +23,35 @@ std::atomic<Model> model{Model::Unknown};
 std::atomic<bool> attached{false}, faulted{false}, resetRx{true};
 std::atomic<unsigned> receiveEpoch{0}, generation{0};
 PositionPipe upstream;
+QueueProbe bleProbe, usbProbe;
+uint64_t usbRxBytes = 0, appRxBytes = 0, bleAcceptedBytes = 0, usbWrittenBytes = 0;
+uint32_t bleBusy = 0, usbWriteMaxUs = 0;
+uint32_t nowMs() { return uint32_t(esp_timer_get_time() / 1000); }
+void performanceWorker(void *) {
+    uint64_t lastRx = 0, lastApp = 0, lastBle = 0, lastUsb = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        portENTER_CRITICAL(&mux);
+        auto b = bleProbe.window(nowMs());
+        auto u = usbProbe.window(nowMs());
+        uint64_t rx = usbRxBytes, appIn = appRxBytes;
+        uint64_t ble = bleAcceptedBytes, usb = usbWrittenBytes;
+        uint32_t busy = bleBusy, writeUs = usbWriteMaxUs;
+        bleBusy = usbWriteMaxUs = 0;
+        portEXIT_CRITICAL(&mux);
+        if (rx != lastRx || appIn != lastApp || b.pending || u.pending) {
+            debug("PERF 5s U>B in=%llu accepted=%llu q=%u hi=%u sample_ms=%lu busy=%lu",
+                  (unsigned long long)(rx-lastRx), (unsigned long long)(ble-lastBle),
+                  unsigned(b.pending), unsigned(b.high), (unsigned long)b.waitMs,
+                  (unsigned long)busy);
+            debug("PERF 5s B>U in=%llu written=%llu q=%u hi=%u sample_ms=%lu write_us=%lu",
+                  (unsigned long long)(appIn-lastApp), (unsigned long long)(usb-lastUsb),
+                  unsigned(u.pending), unsigned(u.high), (unsigned long)u.waitMs,
+                  (unsigned long)writeUs);
+        }
+        lastRx = rx; lastApp = appIn; lastBle = ble; lastUsb = usb;
+    }
+}
 void signal(TaskHandle_t t) {
     if (t)
         xTaskNotifyGive(t);
@@ -37,6 +67,7 @@ void queueToBle(const uint8_t *p, size_t n, void *) {
         return;
     portENTER_CRITICAL(&mux);
     bool ok = toBle.push(p, n);
+    if (ok) bleProbe.push(n, nowMs());
     portEXIT_CRITICAL(&mux);
     if (!ok)
         fault("BLE queue full");
@@ -68,8 +99,14 @@ void stageOutput(const uint8_t *p, size_t n, void *ctx) {
 void emitUsb(const uint8_t *p, size_t n, void *ctx) {
     if (*static_cast<unsigned *>(ctx) != generation.load())
         return;
-    if (!writeUsb(p, n))
-        fault("USB write failed");
+    const int64_t begin = esp_timer_get_time();
+    bool ok = writeUsb(p, n);
+    const uint32_t elapsed = uint32_t(esp_timer_get_time() - begin);
+    portENTER_CRITICAL(&mux);
+    usbWriteMaxUs = std::max(usbWriteMaxUs, elapsed);
+    if (ok) usbWrittenBytes += n;
+    portEXIT_CRITICAL(&mux);
+    if (!ok) fault("USB write failed");
 }
 void bleWorker(void *) {
     uint8_t bytes[253];
@@ -84,11 +121,18 @@ void bleWorker(void *) {
             if (!n)
                 break;
             int rc = notifyApp(bytes, n, epoch);
-            if (rc != 0)
+            if (rc != 0) {
+                portENTER_CRITICAL(&mux);
+                ++bleBusy;
+                portEXIT_CRITICAL(&mux);
                 break; // Ownership stays in our queue until NimBLE accepts it; retry on TX events.
+            }
             portENTER_CRITICAL(&mux);
-            if (epoch == receiveEpoch.load())
+            if (epoch == receiveEpoch.load()) {
                 toBle.consume(n);
+                bleProbe.complete(n, nowMs());
+                bleAcceptedBytes += n;
+            }
             portEXIT_CRITICAL(&mux);
         }
     }
@@ -115,6 +159,9 @@ void usbWorker(void *) {
             }
             const auto previousErrors = leds.invalid;
             leds.feed(command.data, command.n, model.load(), emitUsb, &epoch);
+            portENTER_CRITICAL(&mux);
+            if (command.epoch == generation.load()) usbProbe.complete(command.n + 6, nowMs());
+            portEXIT_CRITICAL(&mux);
             if (leds.invalid != previousErrors)
                 debug("Invalid LED frames %lu", (unsigned long)leds.invalid);
         }
@@ -127,6 +174,8 @@ void startBridge() {
     if (xTaskCreate(usbWorker, "usb_pipe", 4096, nullptr, 8, &usbTask) != pdTRUE)
         abort();
     startGatewayLog();
+    if (xTaskCreate(performanceWorker, "pipe_stats", 3072, nullptr, 2, nullptr) != pdTRUE)
+        abort();
 }
 void debug(const char *fmt, ...) {
     char line[224];
@@ -151,9 +200,11 @@ void usbSession(Model m, uint8_t p) {
     ++generation;
     ++receiveEpoch;
     toBle.clear();
+    bleProbe.clear();
     portEXIT_CRITICAL(&mux);
     portENTER_CRITICAL(&mux);
     toUsb.clear();
+    usbProbe.clear();
     portEXIT_CRITICAL(&mux);
     attached = true;
     debug("USB connected part=0x%02x model=%s", p, name(m));
@@ -167,9 +218,11 @@ void usbDisconnected() {
     ++generation;
     ++receiveEpoch;
     toBle.clear();
+    bleProbe.clear();
     portEXIT_CRITICAL(&mux);
     portENTER_CRITICAL(&mux);
     toUsb.clear();
+    usbProbe.clear();
     portEXIT_CRITICAL(&mux);
     model = Model::Unknown;
     debug("USB disconnected; application session closed");
@@ -177,6 +230,9 @@ void usbDisconnected() {
 }
 bool receiveUsb(const uint8_t *p, size_t n) {
     gatewayLogTraffic();
+    portENTER_CRITICAL(&mux);
+    usbRxBytes += n;
+    portEXIT_CRITICAL(&mux);
     if (resetRx.exchange(false)) {
         upstream.reset(model.load());
     }
@@ -196,6 +252,7 @@ bool receiveApp(const uint8_t *p, size_t n) {
         return false;
     portENTER_CRITICAL(&mux);
     bool ok = toUsb.push(p, n, generation.load());
+    if (ok) { usbProbe.push(n + 6, nowMs()); appRxBytes += n; }
     portEXIT_CRITICAL(&mux);
     if (!ok) {
         fault("USB queue full");
@@ -210,6 +267,7 @@ void appSubscribed(bool on) {
         portENTER_CRITICAL(&mux);
         ++receiveEpoch;
         toBle.clear();
+        bleProbe.clear();
         portEXIT_CRITICAL(&mux);
         faulted = false;
         signal(bleTask);
@@ -219,9 +277,11 @@ void appSubscribed(bool on) {
         ++generation;
         ++receiveEpoch;
         toBle.clear();
+        bleProbe.clear();
         portEXIT_CRITICAL(&mux);
         portENTER_CRITICAL(&mux);
         toUsb.clear();
+        usbProbe.clear();
         portEXIT_CRITICAL(&mux);
     }
     debug("Application notifications %s", on ? "on" : "off");
