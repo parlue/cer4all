@@ -2,7 +2,7 @@
 
 USB-to-Bluetooth Low Energy bridge for Certabo, Tabutronic Spectrum and Sentio chessboards, running on ESP32-S3.
 
-**Development firmware: 0.1.4-dev.** Requests BLE Data Length Extension (251 octets) and 2M PHY, retains the 7.5–15 ms interval request and logs negotiated parameters plus queue performance every five seconds. Board bytes and repeated LED commands remain unchanged. Host tests/builds do not establish hardware performance; Spectrum/WROOM retesting is required. See [PERFORMANCE.md](PERFORMANCE.md).
+**Development firmware: 0.1.5-dev.** Adds conservative automatic 180-degree orientation for Certabo/Spectrum after learning the normal starting arrangement. Normal orientation retains immediate byte-identical forwarding; rotated positions require a complete record. BLE performance options from 0.1.4-dev remain. See [ORIENTATION.md](ORIENTATION.md) for setup, limitations and hardware checks. Hardware testing is pending.
 
 ## Web flasher
 
@@ -45,7 +45,7 @@ The chip mapping targets the boards used for this project. It is not a guarantee
 - One chess application connection; the existing eChessGateway app is used separately for log download.
 - Ordered, bounded queues: 32 KiB USB-to-BLE and 16 KiB application-to-USB. Queue exhaustion causes an explicit error and disconnect rather than silent truncation.
 
-Certabo, Sentio and unknown boards receive native LED bytes unchanged. Spectrum accepts native 247-byte RGB frames and converts standard 8-byte masks to the four corner LEDs of each square. Converted masks use blue at 80% brightness. Every completed Spectrum LED command is forwarded, including identical repeats and keep-alives. There is no move interpretation, blink scheduling or field accumulation in the bridge.
+In normal orientation, Certabo, Sentio and unknown boards receive native LED bytes unchanged. Confirmed rotated Certabo/Spectrum sessions rotate LED coordinates as described in ORIENTATION.md. Spectrum accepts native 247-byte RGB frames and converts standard 8-byte masks to the four corner LEDs of each square. Converted masks use blue at 80% brightness. Every completed Spectrum LED command is forwarded, including identical repeats and keep-alives. There is no move interpretation, blink scheduling or field accumulation in the bridge.
 
 A 247-byte RGB frame takes approximately 64 ms over the 38400-baud serial link. Sustained rates above roughly 15 frames per second can therefore create a backlog.
 
@@ -55,7 +55,7 @@ A single 8-byte BLE write is treated as a monochrome mask; otherwise `FF55` star
 
 ### Transparent board data
 
-USB board data is forwarded byte-for-byte for every model, including arbitrary piece IDs, duplicate IDs, sensor-noise readings, acknowledgements and whitespace. No piece learning, temporal filtering, replacement with empty fields or retention of previous positions occurs in the interface. The chess application remains responsible for calibration and handling sensor noise, just as with direct USB. Passive Sentio detection observes the stream without changing it.
+In normal orientation, USB board data is forwarded byte-for-byte for every model, including arbitrary piece IDs, duplicate IDs, sensor-noise readings, acknowledgements and whitespace. In confirmed rotated orientation, complete Certabo/Spectrum positions are reordered by square while retaining every ID value; see ORIENTATION.md. The application remains responsible for piece calibration. The interface only remembers an initial ID-to-role reference for orientation detection; it performs no temporal filtering, replacement with empty fields or retention of previous positions in the forwarded data. The chess application remains responsible for calibration and handling sensor noise, just as with direct USB. Passive Sentio detection observes the stream without changing it.
 
 ## Building
 

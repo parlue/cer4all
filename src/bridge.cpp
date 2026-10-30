@@ -1,6 +1,7 @@
 #include "bridge.hpp"
 #include "gateway_log.hpp"
 #include "queue_probe.hpp"
+#include "orientation.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -22,7 +23,10 @@ TaskHandle_t bleTask = nullptr, usbTask = nullptr;
 std::atomic<Model> model{Model::Unknown};
 std::atomic<bool> attached{false}, faulted{false}, resetRx{true};
 std::atomic<unsigned> receiveEpoch{0}, generation{0};
-PositionPipe upstream;
+OrientedPositionPipe upstream;
+std::atomic<bool> physicalRotated{false};
+std::atomic<unsigned> orientationNotice{0};
+std::atomic<unsigned> usbLifetime{0};
 QueueProbe bleProbe, usbProbe;
 uint64_t usbRxBytes = 0, appRxBytes = 0, bleAcceptedBytes = 0, usbWrittenBytes = 0;
 uint32_t bleBusy = 0, usbWriteMaxUs = 0;
@@ -84,6 +88,21 @@ void flushBlock(EmitBlock &block) {
         block.used = 0;
     }
 }
+void orientationChanged(bool rotated, void *ctx) {
+    flushBlock(*static_cast<EmitBlock *>(ctx));
+    portENTER_CRITICAL(&mux);
+    physicalRotated = rotated;
+    // No pre-switch LED command or partial notification may cross the boundary.
+    ++generation;
+    ++receiveEpoch;
+    toUsb.clear(); usbProbe.clear();
+    toBle.clear(); bleProbe.clear();
+    ++orientationNotice;
+    portEXIT_CRITICAL(&mux);
+    signal(usbTask);
+    debug("ORIENTATION %s; coordinate epoch changed; two centre flashes",
+          rotated ? "black at physical bottom (180 degrees)" : "white at physical bottom (normal)");
+}
 void stageOutput(const uint8_t *p, size_t n, void *ctx) {
     auto &block = *static_cast<EmitBlock *>(ctx);
     while (n) {
@@ -107,6 +126,14 @@ void emitUsb(const uint8_t *p, size_t n, void *ctx) {
     if (ok) usbWrittenBytes += n;
     portEXIT_CRITICAL(&mux);
     if (!ok) fault("USB write failed");
+}
+void confirmationLeds(bool on, unsigned epoch) {
+    uint8_t mask[8]{}, rgb[247];
+    if (on) mask[3] = mask[4] = 24;
+    if (model.load() == Model::Spectrum) {
+        rgbFromMask(mask, rgb);
+        emitUsb(rgb, sizeof(rgb), &epoch);
+    } else emitUsb(mask, sizeof(mask), &epoch);
 }
 void bleWorker(void *) {
     uint8_t bytes[253];
@@ -140,10 +167,39 @@ void bleWorker(void *) {
 void usbWorker(void *) {
     Command command{};
     Leds leds;
-    unsigned epoch = ~0u;
+    unsigned epoch = ~0u, notice = 0, lifetime = usbLifetime.load();
+    OrientationBlink blink;
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ulTaskNotifyTake(pdTRUE, blink.active() ? pdMS_TO_TICKS(10) : portMAX_DELAY);
+        if (lifetime != usbLifetime.load()) {
+            lifetime = usbLifetime.load();
+            blink.reset(); leds.reset(); notice = 0; epoch = ~0u;
+        }
+        if (!attached) { blink.reset(); continue; }
+        if (faulted) {
+            if (blink.active()) { blink.reset(); confirmationLeds(false, generation.load()); }
+            continue;
+        }
+        // A BLE reconnect must not strand an ON phase on the physical board.
+        // Finish the brief sequence with OFF, even if the client disconnected.
+        if (blink.active() && epoch != generation.load()) {
+            epoch = generation.load();
+            leds.reset();
+        }
+        if (notice != orientationNotice.load()) {
+            notice = orientationNotice.load();
+            epoch = generation.load();
+            leds.reset();
+            blink.start(nowMs());
+        }
+        if (blink.active()) {
+            bool on = false;
+            if (blink.next(nowMs(), on)) confirmationLeds(on, epoch);
+            if (blink.active()) continue;
+            // Final OFF was just sent. Resume only the post-switch app FIFO.
+        }
         while (attached && !faulted) {
+            if (notice != orientationNotice.load()) break;
             uint32_t packetEpoch = 0;
             portENTER_CRITICAL(&mux);
             bool got = toUsb.pop(command.data, sizeof(command.data), command.n, packetEpoch);
@@ -158,7 +214,7 @@ void usbWorker(void *) {
                 epoch = command.epoch;
             }
             const auto previousErrors = leds.invalid;
-            leds.feed(command.data, command.n, model.load(), emitUsb, &epoch);
+            leds.feed(command.data, command.n, model.load(), emitUsb, &epoch, physicalRotated.load());
             portENTER_CRITICAL(&mux);
             if (command.epoch == generation.load()) usbProbe.complete(command.n + 6, nowMs());
             portEXIT_CRITICAL(&mux);
@@ -194,9 +250,12 @@ void debug(const char *fmt, ...) {
 }
 void usbSession(Model m, uint8_t p) {
     model = m;
+    physicalRotated = false;
     resetRx = true;
     faulted = false;
     portENTER_CRITICAL(&mux);
+    ++usbLifetime;
+    orientationNotice = 0;
     ++generation;
     ++receiveEpoch;
     toBle.clear();
@@ -207,6 +266,7 @@ void usbSession(Model m, uint8_t p) {
     usbProbe.clear();
     portEXIT_CRITICAL(&mux);
     attached = true;
+    signal(usbTask);
     debug("USB connected part=0x%02x model=%s", p, name(m));
     bleBoardChanged();
 }
@@ -215,6 +275,8 @@ void usbDisconnected() {
     resetRx = true;
     disconnectApp();
     portENTER_CRITICAL(&mux);
+    ++usbLifetime;
+    orientationNotice = 0;
     ++generation;
     ++receiveEpoch;
     toBle.clear();
@@ -225,6 +287,7 @@ void usbDisconnected() {
     usbProbe.clear();
     portEXIT_CRITICAL(&mux);
     model = Model::Unknown;
+    signal(usbTask);
     debug("USB disconnected; application session closed");
     bleBoardChanged();
 }
@@ -238,8 +301,15 @@ bool receiveUsb(const uint8_t *p, size_t n) {
     }
     EmitBlock block;
     const Model before = upstream.type();
-    upstream.feed(p, n, stageOutput, &block);
+    const bool learnedBefore = upstream.learned();
+    upstream.feed(p, n, stageOutput, &block, orientationChanged);
+    if (upstream.overflow()) {
+        fault("rotated position record exceeds bounded buffer");
+        return false;
+    }
     flushBlock(block);
+    if (!learnedBefore && upstream.learned())
+        debug("ORIENTATION reference learned: 3 complete initial positions; white initially at physical bottom");
     if (upstream.type() != before) {
         model = upstream.type();
         debug("8-value protocol: Sentio (no invented IDs)");

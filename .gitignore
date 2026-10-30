@@ -10,5 +10,6 @@ CER4ALL_Grundlagen.md
 *.md
 !README.md
 !PERFORMANCE.md
+!ORIENTATION.md
 /BUILD_RESULT.json
 /TEST_RESULT.json

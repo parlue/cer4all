@@ -156,12 +156,24 @@ inline void rgbFromMask(const uint8_t mask[8], uint8_t frame[247]) {
         }
 }
 enum class LedInput : uint8_t { Auto, Mono, Rgb };
+inline void rotateMask180(const uint8_t in[8], uint8_t out[8]) {
+    for (unsigned row = 0; row < 8; ++row) {
+        uint8_t b = in[7-row], r = 0;
+        for (unsigned bit = 0; bit < 8; ++bit) r |= ((b >> bit) & 1u) << (7-bit);
+        out[row] = r;
+    }
+}
+inline void rotateRgb180(const uint8_t in[247], uint8_t out[247]) {
+    out[0] = in[0]; out[1] = in[1]; out[245] = in[245]; out[246] = in[246];
+    for (unsigned corner = 0; corner < 81; ++corner)
+        std::memcpy(out+2+3*corner, in+2+3*(80-corner), 3);
+}
 class Leds {
     std::array<uint8_t, 247> pending_{};
     size_t used_ = 0;
     bool rgb_ = false;
-    void complete(Model model, Emit out, void *ctx) {
-        uint8_t converted[247];
+    void complete(Model model, Emit out, void *ctx, bool turn) {
+        uint8_t converted[247], mapped[247];
         const uint8_t *bytes = pending_.data();
         size_t n = used_;
         if (rgb_) {
@@ -171,6 +183,16 @@ class Leds {
                 used_ = 0;
                 return;
             }
+        }
+        if (turn) {
+            if (rgb_) {
+                rotateRgb180(bytes, mapped);
+                // Reordered corner triples can create a new in-band FF55 marker.
+                for (size_t i = 2; i < 244; ++i)
+                    if (mapped[i] == 255 && mapped[i+1] == 85) mapped[i] = 254;
+            }
+            else rotateMask180(bytes, mapped);
+            bytes = mapped;
         }
         if (model == Model::Spectrum && !rgb_) {
             rgbFromMask(bytes, converted);
@@ -193,9 +215,9 @@ class Leds {
     bool pending() const {
         return used_ != 0;
     }
-    void feed(const uint8_t *p, size_t n, Model model, Emit out, void *ctx) {
+    void feed(const uint8_t *p, size_t n, Model model, Emit out, void *ctx, bool turn = false) {
         // Mono/unknown/Sentio native streams stay byte-identical (including Sentio v2).
-        if (model != Model::Spectrum) {
+        if (model != Model::Spectrum && !(turn && model == Model::Certabo)) {
             out(p, n, ctx);
             return;
         }
@@ -203,12 +225,12 @@ class Leds {
             input == LedInput::Mono || (input == LedInput::Auto && used_ == 0 && n == 8);
         for (size_t i = 0; i < n; ++i) {
             if (used_ == 0)
-                rgb_ = input == LedInput::Rgb || (!wholeMono && p[i] == 255);
+                rgb_ = model == Model::Spectrum && (input == LedInput::Rgb || (!wholeMono && p[i] == 255));
             pending_[used_++] = p[i];
             if (input != LedInput::Rgb && rgb_ && used_ == 2 && pending_[1] != 85)
                 rgb_ = false;
             if (used_ == (rgb_ ? 247u : 8u))
-                complete(model, out, ctx);
+                complete(model, out, ctx, turn);
         }
     }
 };

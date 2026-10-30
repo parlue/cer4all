@@ -4,6 +4,7 @@
 #include "core.hpp"
 #include "log_protocol.hpp"
 #include "queue_probe.hpp"
+#include "orientation_test.hpp"
 #include <cassert>
 #include <vector>
 #include <string>
@@ -26,6 +27,8 @@ std::string line(unsigned values) {
     return s + "\r\n";
 }
 int main() {
+    orientation_test::run();
+    std::cout << "PASS: stable orientation detection, normal byte identity, rotated records/LEDs, both directions and bounded blink\n";
     // Queue telemetry observes completion, including in-flight writes, and wraps time safely.
     QueueProbe probe;
     probe.push(64, 100);
